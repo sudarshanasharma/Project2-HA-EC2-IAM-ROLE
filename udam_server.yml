@@ -1,0 +1,292 @@
+Description: 
+  This deploys the Udagram Servers
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+    Default: SSUdagramProject
+  AMIID:
+    Description: Amazon Machine ImageId
+    Type: String
+    Default: ami-003634241a8fcdec0
+  TypeofInstance:
+    Description: EC2 Instance that most suits the requirements
+    Type: String
+    Default: t3.small
+  LocalIPCIDR:
+     Description: IP-CIDR of the local machine that connects to the bastion host
+     Type: String
+     Default: 0.0.0.0/0
+  
+    
+Resources:
+  BastionHostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+        - PolicyName: 'AllowParameterRead'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 'ssm:GetParameters'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/projects/elbkey'
+  SSMPolicies:
+      Type: "AWS::IAM::Policy"
+      Properties:
+          PolicyName: "root"
+          PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                  - Effect: "Allow"
+                    Action:
+                        - "ssm:Get*"
+                    Resource: "*"
+          Roles:
+              - Ref: "BastionHostRole"
+  BastionHostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+      - !Ref 'BastionHostRole'
+ 
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH Access for Bastion Instance
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Ref LocalIPCIDR
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0 
+        
+  BastionEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0528a5175983e7f28
+      KeyName: bastion_host
+      InstanceType: t2.micro
+      BlockDeviceMappings:
+      - DeviceName: "/dev/xvda"
+        Ebs:
+          VolumeSize: 8
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          SubnetId: 
+            Fn::ImportValue: 
+             !Sub "${EnvironmentName}-PUB1-SN"      
+          Description: Interface for controlling traffic such as SSH
+          GroupSet: 
+              - !Ref BastionSecurityGroup
+          DeviceIndex: 0
+      IamInstanceProfile:
+          Ref: "BastionHostInstanceProfile"
+      UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash 
+            sudo yum reinstall ec2-net-utils -y;
+            sudo ec2ifup eth1;
+            sudo yum update -y;
+            sudo yum reinstall awscli -y;
+            cd /home/ec2-user;
+            sudo aws ssm get-parameter --name ssh_key --with-decryption --output text --region us-west-2 --query Parameter.Value | sed 's/.*-----BEGIN/-----BEGIN/' | sed 's/KEY------.*/KEY------/' > elbkey.pem;
+            sudo truncate -s -1 elbkey.pem;
+            sudo chmod 600 elbkey.pem
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+        
+  EIPAssociation1:
+    Type: AWS::EC2::EIPAssociation
+    DependsOn:
+    - BastionEC2Instance
+    - EIP
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      InstanceId: !Ref BastionEC2Instance
+      
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our load balancer
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+  WebServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our hosts and SSH from local only
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+          
+  SSUdacityS3ReadOnlyEC2:
+        Type: "AWS::IAM::Role"
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: "Allow"
+                      Principal:
+                          Service:
+                              - "ec2.amazonaws.com"
+                      Action:
+                          - "sts:AssumeRole"
+            ManagedPolicyArns:
+                - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+  RolePolicies:
+        Type: "AWS::IAM::Policy"
+        Properties:
+            PolicyName: "root"
+            PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: "Allow"
+                      Action:
+                          - "s3:Get*"
+                          - "s3:List*"
+                      Resource: "*"
+            Roles:
+                - Ref: "SSUdacityS3ReadOnlyEC2"
+
+    #instace profile contains the IAM Role name(s) that we want to asso
+  NewProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+         - Ref: "SSUdacityS3ReadOnlyEC2"
+  WebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: false
+      IamInstanceProfile: 
+          Ref: "NewProfile"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt-get update -y;
+          sudo apt-get install unzip -y;
+          sudo apt-get install awscli -y;
+          sudo apt-get install apache2 -y;
+          sudo systemctl start apache2;
+          cd /var/www/html;
+          sudo rm -rf *;
+          sudo aws s3 cp s3://udacity-demo-1/udacity.zip ./;
+          sudo unzip -o udacity.zip;
+          sudo systemctl restart apache2
+      ImageId: !Ref AMIID
+      SecurityGroups:
+        - Ref: WebServerSecGroup
+      InstanceType: !Ref TypeofInstance
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdc"
+          Ebs:
+            VolumeSize: 10
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PRIV-NETS"
+      LaunchConfigurationName:
+        Ref: WebAppLaunchConfig
+      MinSize: "2"
+      MaxSize: "5"
+      TargetGroupARNs:
+        - Ref: WebAppTargetGroup
+  WebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      SecurityGroups:
+        - Ref: LBSecGroup
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: WebAppTargetGroup
+      LoadBalancerArn:
+        Ref: WebAppLB
+      Port: 80
+      Protocol: HTTP
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref "WebAppTargetGroup"
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref "Listener"
+      Priority: 1
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 35
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 10
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+Outputs:
+  WebAppLB:
+    Description: The public URL of the Load Balancer
+    Value: !Join
+      - ""
+      - - !Sub "http://"
+        - !GetAtt WebAppLB.DNSName
+
+    Export:
+      Name: !Sub ${EnvironmentName}-ELB-DNS

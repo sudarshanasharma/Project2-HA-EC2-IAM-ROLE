@@ -1,0 +1,18 @@
+[
+	{
+		"ParameterKey": "EnvironmentName",
+		"ParameterValue": "SSUdagramProject"
+	},
+    {
+      "ParameterKey": "AMIID",
+      "ParameterValue": "ami-003634241a8fcdec0"
+  },
+  {
+      "ParameterKey": "TypeofInstance",
+      "ParameterValue": "t3.small"
+  },
+  {
+        "ParameterKey": "LocalIPCIDR",
+        "ParameterValue": "73.63.244.150/32"
+  }
+]
